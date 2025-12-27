@@ -1,0 +1,508 @@
+services:
+  # Database Services
+  nats:
+    image: docker.io/nats:${NATS_VERSION:-2.11-alpine}
+    command: --http_port 8222
+    ports:
+      - "${NATS_BIND_IP:-127.0.0.1}:${NATS_PORT_NUMBER:-4222}:4222"
+    expose:
+      - "4222"
+      - "8222"
+      - "6222"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
+  nats-exporter:
+    image: docker.io/natsio/prometheus-nats-exporter:${NATS_EXPORTER_VERSION:-0.17.3}
+    command:
+      - -healthz
+      - -varz
+      - "http://nats:8222"
+    expose:
+      - "7777"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  mongodb:
+    image: docker.io/bitnamilegacy/mongodb:${MONGODB_VERSION:-6.0}
+    volumes:
+      - ${MONGODB_HOST_PATH:-mongodb_data}:/bitnami/mongodb:rw
+    environment:
+      MONGODB_REPLICA_SET_MODE: ${MONGODB_REPLICA_SET_MODE:-primary}
+      MONGODB_REPLICA_SET_NAME: ${MONGODB_REPLICA_SET_NAME:-rs0}
+      MONGODB_PORT_NUMBER: ${MONGODB_PORT_NUMBER:-27017}
+      MONGODB_INITIAL_PRIMARY_HOST: ${MONGODB_INITIAL_PRIMARY_HOST:-mongodb}
+      MONGODB_INITIAL_PRIMARY_PORT_NUMBER: ${MONGODB_INITIAL_PRIMARY_PORT_NUMBER:-27017}
+      MONGODB_ADVERTISED_HOSTNAME: ${MONGODB_ADVERTISED_HOSTNAME:-mongodb}
+      MONGODB_ENABLE_JOURNAL: ${MONGODB_ENABLE_JOURNAL:-true}
+      ALLOW_EMPTY_PASSWORD: ${ALLOW_EMPTY_PASSWORD:-yes}
+    expose:
+      - "${MONGODB_PORT_NUMBER:-27017}"
+    ports:
+      - "${MONGODB_BIND_IP:-127.0.0.1}:${MONGODB_PORT_NUMBER:-27017}:${MONGODB_PORT_NUMBER:-27017}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+        window: 180s
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+
+  mongodb-exporter:
+    image: docker.io/percona/mongodb_exporter:${MONGODB_EXPORTER_VERSION:-0.44.0}
+    command:
+      - --mongodb.uri=${MONGODB_URI:-mongodb://mongodb:27017}
+      - --collect-all
+      - --compatible-mode
+    expose:
+      - "9216"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  # RocketChat Service
+  rocketchat:
+    image: ${IMAGE:-registry.rocket.chat/rocketchat/rocket.chat}:${RELEASE:-latest}
+    labels:
+      prometheus.io/scrape: "true"
+      prometheus.io/port: ${METRICS_PORT:-9458}
+    environment:
+      ROOT_URL: ${ROOT_URL:-http://localhost}
+      PORT: ${PORT:-3000}
+      DEPLOY_METHOD: docker
+      DEPLOY_PLATFORM: compose
+      REG_TOKEN: ${REG_TOKEN:-}
+      LICENSE_DEBUG: true
+      OVERWRITE_SETTING_Prometheus_Enabled: true
+      OVERWRITE_SETTING_Prometheus_Port: "${METRICS_PORT:-9458}"
+      MONGO_URL: ${MONGO_URL:-mongodb://mongodb:27017/rocketchat?replicaSet=rs0}
+      TRANSPORTER: "${NATS_URL-monolith+nats://nats:4222}"
+      INSTANCE_IP: "${INSTANCE_IP:-}"
+    expose:
+      - "${PORT:-3000}"
+      - "${METRICS_PORT:-9458}"
+    ports:
+      - "${BIND_IP:-0.0.0.0}:${HOST_PORT:-3000}:${PORT:-3000}"
+      - "${BIND_IP:-0.0.0.0}:${METRICS_PORT:-9458}:${METRICS_PORT:-9458}"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "10"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+        window: 180s
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+
+  # Monitoring Services
+  prometheus:
+    image: docker.io/prom/prometheus:${PROMETHEUS_VERSION:-v3.4.2}
+    user: root
+    command:
+      - --web.console.templates=/usr/share/prometheus/consoles
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-lifecycle
+      - --web.listen-address=:9090
+      - --storage.tsdb.path=/prometheus/data
+      - --config.auto-reload-interval=30s
+      - --auto-gomaxprocs
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-15GB}
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-15d}
+    expose:
+      - "9090"
+    ports:
+      - ${PROMETHEUS_LISTEN_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9090}:9090
+    volumes:
+      - prometheus_tsdb:/prometheus:rw
+      - ./files/prometheus:/etc/prometheus:Z
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  node-exporter:
+    image: docker.io/prom/node-exporter:${NODE_EXPORTER_VERSION:-v1.9.1}
+    privileged: true
+    network_mode: host
+    pid: host
+    volumes:
+      - /sys:/host/sys:ro
+      - /proc:/host/proc:ro
+      - /dev:/host/dev:ro
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    expose:
+      - "9100"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service"
+    deploy:
+      mode: global
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M
+        reservations:
+          cpus: '0.1'
+          memory: 64M
+
+  grafana:
+    image: docker.io/grafana/grafana:${GRAFANA_VERSION:-12.0.2}
+    expose:
+      - "3000"
+    ports:
+      - "${GRAFANA_BIND_IP:-0.0.0.0}:${GRAFANA_HOST_PORT:-5050}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana:Z
+      - ./files/grafana/dashboards:/dashboards:Z
+      - ./files/grafana/provisioning/:/etc/grafana/provisioning:Z
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-rc-admin}
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+      - GF_AUTH_ANONYMOUS_ORG_NAME=Main Org.
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_SERVER_ROOT_URL=http://${GRAFANA_DOMAIN}${GRAFANA_PATH}/
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # Traefik Services
+  traefik-init:
+    image: docker.io/alpine:latest
+    entrypoint: sh
+    environment:
+      ROCKETCHAT_BACKEND_SERVERS: ${ROCKETCHAT_BACKEND_SERVERS:-rocketchat:3000}
+    command:
+      - -c
+      - |-
+        set -e
+        rm -rf /traefik_config/* || true
+        mkdir -p /traefik_config/http /traefik_config/https
+        cat <<'EOF' > /traefik_config/services.tpl
+          services:
+            grafana:
+              loadBalancer:
+                servers:
+                  - url: "http://grafana:3000"
+            rocketchat:
+              loadBalancer:
+                healthCheck:
+                  path: /health
+                  interval: 10s
+                  timeout: 3s
+                servers:
+        EOF
+
+        echo "ROCKETCHAT_BACKEND_SERVERS $$ROCKETCHAT_BACKEND_SERVERS"
+        for server in $(echo $$ROCKETCHAT_BACKEND_SERVERS | tr "," "\n" | tr -d " "); do
+          echo "          - url: \"http://$$server\"" >> /traefik_config/services.tpl
+        done
+
+        cat <<'EOF' > /traefik_config/http/dynamic.yml
+        http:
+          routers:
+            rocketchat:
+              entryPoints:
+                - http
+              service: rocketchat
+              rule: Host(`{{ env "DOMAIN" }}`) && PathPrefix(`/`)
+            grafana:
+              entryPoints:
+                - http
+              service: grafana
+              rule: |-
+                {{ if eq (env "GRAFANA_DOMAIN") "" }}
+                  Host(`{{ env "DOMAIN" }}`) && PathPrefix(`{{ env "GRAFANA_PATH" }}`)
+                {{ else }}
+                  Host(`{{ env "GRAFANA_DOMAIN" }}`)
+                {{ end }}
+        EOF
+
+        cat <<'EOF' > /traefik_config/https/dynamic.yml
+        https:
+          address: ":443"
+          http:
+            redirections:
+              entryPoint:
+                to: "http"
+                scheme: "https"
+        http:
+          routers:
+            rocketchat:
+              entryPoints:
+                - https
+              service: rocketchat
+              rule: Host(`{{ env "DOMAIN" }}`)
+              tls:
+                certResolver: le
+            grafana:
+              entryPoints:
+                - https
+              rule: |
+                {{ if eq (env "GRAFANA_DOMAIN") "" }}
+                  Host(`{{ env "DOMAIN" }}`) && PathPrefix(`{{ env "GRAFANA_PATH" }}`)
+                {{ else }}
+                  Host(`{{ env "GRAFANA_DOMAIN" }}`)
+                {{ end }}
+              service: grafana
+              tls:
+                certResolver: le
+        EOF
+
+        cat /traefik_config/services.tpl >> /traefik_config/http/dynamic.yml
+        cat /traefik_config/services.tpl >> /traefik_config/https/dynamic.yml
+        cat /traefik_config/http/dynamic.yml
+        echo "-------------------------"
+        cat /traefik_config/https/dynamic.yml
+
+        echo "files generated, keeping container alive to podman-compose detect it"
+        tail -f /dev/null
+    volumes:
+      - traefik_config:/traefik_config:z
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: none
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.1'
+          memory: 64M
+        reservations:
+          cpus: '0.05'
+          memory: 32M
+
+  traefik:
+    image: docker.io/traefik:${TRAEFIK_RELEASE:-v3.4}
+    environment:
+      DOMAIN: "${DOMAIN:-localhost}"
+      GRAFANA_DOMAIN: "${GRAFANA_DOMAIN-}"
+      GRAFANA_PATH: "${GRAFANA_PATH-/}"
+      TRAEFIK_PROTOCOL: "${TRAEFIK_PROTOCOL-}"
+    command:
+      - --api.insecure=${TRAEFIK_API_INSECURE:-false}
+      - --providers.docker=false
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.http.address=:${TRAEFIK_HTTP_PORT:-80}
+      - --entrypoints.https.address=:${TRAEFIK_HTTPS_PORT:-443}
+      - --entrypoints.metrics.address=:9096
+      - --metrics.prometheus=true
+      - --certificatesresolvers.le.acme.tlschallenge=${LETSENCRYPT_ENABLED:-false}
+      - --certificatesresolvers.le.acme.email=${LETSENCRYPT_EMAIL?need email for cert expiry notifications}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --metrics.prometheus.entryPoint=metrics
+      - --metrics.prometheus.addEntryPointsLabels=true
+      - --metrics.prometheus.addRoutersLabels=true
+      - --metrics.prometheus.addServicesLabels=true
+      - --providers.file.filename=/traefik_config/${TRAEFIK_PROTOCOL}/dynamic.yml
+      - --providers.file.watch=true
+    ports:
+      - ${TRAEFIK_HTTP_PORT:-80}:${TRAEFIK_HTTP_PORT:-80}
+      - ${TRAEFIK_DASHBOARD_PORT:-8080}:8080
+      - ${TRAEFIK_HTTPS_PORT:-443}:${TRAEFIK_HTTPS_PORT:-443}
+    expose:
+      - "9096"
+      - "${TRAEFIK_HTTP_PORT:-80}"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}"
+      - "${TRAEFIK_HTTPS_PORT:-443}"
+    volumes:
+      - traefik_ssl:/letsencrypt:z
+      - traefik_config:/traefik_config:z
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+        labels: "service"
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 5
+        window: 120s
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        failure_action: rollback
+        monitor: 60s
+
+volumes:
+  mongodb_data:
+    driver: local
+  prometheus_tsdb:
+    driver: local
+  prometheus_config:
+    driver: local
+  grafana_data:
+    driver: local
+  traefik_ssl:
+    driver: local
+  traefik_config:
+    driver: local
+
+networks:
+  default:
+    driver: overlay
+    attachable: true
+
